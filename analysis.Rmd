@@ -1,0 +1,1260 @@
+---
+title: "Students Who Feel Supported Show Higher Persistence in Their Studies"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    number_sections: true
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 6, fig.align = "center")
+```
+
+# Introduction
+
+## Analytical Statement
+
+> **"Students who feel supported show higher persistence in their studies."**
+
+This report investigates whether various forms of support -- parental involvement, access to resources, teacher quality, peer influence, tutoring, and school type -- are associated with higher levels of student persistence. Persistence is defined as sustained academic effort and engagement, measured through study hours, attendance, motivation, exam performance, score improvement, and participation in extracurricular activities.
+
+## Dataset Description
+
+We use the **Student Performance Factors** dataset, which contains **6,607 observations** across **20 variables** capturing academic, social, and demographic attributes of students. This is **secondary data** sourced from Kaggle:
+
+
+## Variable Structure
+
+Our variables are organized into three categories based on their role in the analysis:
+
+| Role | Variables |
+|:-----|:---------|
+| **Independent (Support)** | Parental_Involvement, Access_to_Resources, Tutoring_Sessions, Teacher_Quality, Peer_Influence |
+| **Dependent (Persistence)** | Hours_Studied, Attendance, Score_Improvement (derived) |
+| **Control (Confounders)** | Family_Income, Parental_Education_Level, Gender, Distance_from_Home |
+
+- **Independent variables** measure different dimensions of support that a student receives.
+- **Dependent variables** are combined into a single **Persistence Index** (composite average of -1 to 1 scaled components) for modelling, while analyzed individually in the descriptive phase.
+- **Control variables** are included in regression to isolate the true effect of support, but are not themselves interpreted as "support."
+- Control variables were considered, but the final model focuses on primary support factors to maintain clarity and interpretability
+
+## Methodology
+
+The analysis follows three phases, each mapped to the module's learning outcomes:
+
+1. **Descriptive Analytics** -- Summarize variables, visualize distributions, and fit probability distributions from the exponential family (Normal, Gamma, Poisson, Binomial).
+2. **Inferential Analytics** -- Conduct hypothesis tests (ANOVA, t-tests, proportion tests, variance tests, correlation tests) to determine whether the observed patterns are statistically significant.
+3. **Predictive Analytics** -- Build a Multiple Linear Regression model to quantify the effect of support on persistence, and a Decision Tree Regression model to provide an interpretable non-linear alternative for predicting persistence.
+
+
+---
+
+
+# Data Loading and Preparation
+
+## Package Setup
+
+We load the required R packages for data manipulation, visualization, statistical testing, distribution fitting, and machine learning.
+
+```{r packages}
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret", dependencies = TRUE, repos = "https://cran.r-project.org")
+}
+
+required_packages <- c("tidyverse", "MASS", "car", "corrplot", "nortest",
+                       "caret", "fitdistrplus", "rpart", "rpart.plot")
+new_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if (length(new_packages)) {
+  tryCatch(
+    install.packages(new_packages, dependencies = TRUE, repos = "https://cran.r-project.org"),
+    error = function(e) message("Package installation skipped in this environment: ", conditionMessage(e))
+  )
+}
+
+for (pkg in required_packages) {
+  if (requireNamespace(pkg, quietly = TRUE)) {
+    library(pkg, character.only = TRUE)
+  } else {
+    message("Package not available: ", pkg)
+  }
+}
+set.seed(42)
+```
+
+## Loading the Dataset
+
+```{r load-data}
+dataset_file <- "Student Performance Factors.csv"
+data <- read.csv(dataset_file, stringsAsFactors = FALSE)
+```
+
+Loaded file: **`r dataset_file`**
+
+The dataset contains **`r nrow(data)` rows** and **`r ncol(data)` columns**.
+
+```{r structure}
+str(data)
+```
+
+## Missing Values Check
+
+Before proceeding, we check for both standard `NA` values and blank text entries. Some missing values in CSV files are stored as empty strings rather than `NA`, so checking only `is.na()` can undercount missing data.
+
+```{r missing-values}
+missing_summary <- data.frame(
+  Variable = names(data),
+  NA_Count = sapply(data, function(x) sum(is.na(x))),
+  Blank_Count = sapply(data, function(x) {
+    if (is.character(x)) sum(!is.na(x) & trimws(x) == "") else 0
+  }),
+  row.names = NULL
+)
+
+missing_summary$Total_Missing <- missing_summary$NA_Count + missing_summary$Blank_Count
+
+knitr::kable(missing_summary, row.names = FALSE,caption="Missing Value Counts Including Blank Strings")
+
+data <- data %>%mutate(across(where(is.character), ~ na_if(trimws(.x), "")))
+
+rows_before_complete_case <- nrow(data)
+data <- data %>% drop_na()
+rows_after_complete_case <- nrow(data)
+rows_removed_complete_case <- rows_before_complete_case - rows_after_complete_case
+```
+
+**Conclusion:** `r if(sum(missing_summary$Total_Missing) == 0) "The dataset has no missing values. No imputation is required, and all observations are usable." else paste("The dataset contains", sum(missing_summary$Total_Missing), "missing values when blank strings are counted. Blank strings are converted to NA before variable encoding.")`
+
+Since the missing values represent a very small portion of the dataset, we use **complete-case analysis** instead of filling missing values. This means rows with missing values are removed before modelling. This is more suitable here because imputing values such as `Teacher_Quality`, `Parental_Education_Level`, or `Distance_from_Home` would introduce artificial categories or guessed values into the analysis. Complete-case analysis keeps the modelling process transparent and avoids changing the original category distributions.
+
+After applying complete-case analysis, the dataset contains **`r rows_after_complete_case` rows**. A total of **`r rows_removed_complete_case` rows** were removed from the original **`r rows_before_complete_case` rows**. The proportion of removed rows is negligible relative to the dataset size, ensuring minimal impact on analysis
+
+
+## Variable Encoding
+
+| Variable | Type | Nature | Encoding Technique | Reason |
+|:--|:--|:--|:--|:--|
+| Parental_Involvement | Categorical | Ordinal | Label Encoding (1,2,3) | Has order (Low < Medium < High) |
+| Access_to_Resources | Categorical | Ordinal | Label Encoding (1,2,3) | Ordered levels |
+| Motivation_Level | Categorical | Ordinal | Label Encoding (1,2,3) | Ordered |
+| Teacher_Quality | Categorical | Ordinal | Label Encoding (1,2,3) | Ordered |
+| Family_Income | Categorical | Ordinal | Label Encoding (1,2,3) | Ordered |
+| Peer_Influence | Categorical | Ordinal | Label Encoding (1,2,3) | Negative < Neutral < Positive |
+| Distance_from_Home | Categorical | Ordinal | Label Encoding (1,2,3) | Near < Moderate < Far |
+| Parental_Education_Level | Categorical | Ordinal | Label Encoding (1,2,3) | Education hierarchy |
+| Extracurricular_Activities | Categorical | Binary | Binary Encoding (0/1) | Yes/No |
+| Internet_Access | Categorical | Binary | Binary Encoding (0/1) | Yes/No |
+| Learning_Disabilities | Categorical | Binary | Binary Encoding (0/1) | Yes/No |
+| Gender | Categorical | Nominal (Binary) | Binary Encoding (0/1) | No ranking |
+| School_Type | Categorical | Nominal (Binary) | Binary Encoding (0/1) | No ranking |
+
+NONE of the variables actually require full one-hot encoding.
+
+Why?
+
+The dataset has:
+
+- Ordinal variables -> need order -> use 1,2,3
+- Binary variables -> already 2 categories -> use 0/1
+
+One-hot encoding is mainly needed for variables with 3+ categories and no order.
+
+### Data Validation
+
+Before encoding categorical variables, the observed category labels are checked against the expected labels. This is necessary because numeric encoding assumes that each label has a fixed meaning. For example, if `"Medium"` were misspelled, converting directly to a factor could silently create missing values and distort the model inputs.
+
+This validation step protects the analysis from accidental misclassification before any ordinal or binary mapping is applied.
+
+```{r encoding-validation}
+ordinal_levels <- c("Low", "Medium", "High")
+peer_levels <- c("Negative", "Neutral", "Positive")
+distance_levels <- c("Near", "Moderate", "Far")
+education_levels <- c("High School", "College", "Postgraduate")
+
+validate_levels <- function(variable, allowed_levels) {
+  actual_levels <- unique(data[[variable]][!is.na(data[[variable]])])
+  invalid_levels <- setdiff(actual_levels, allowed_levels)
+
+  if (length(invalid_levels) > 0) {
+    stop(paste(
+      "Unexpected value(s) in", variable, ":",
+      paste(invalid_levels, collapse = ", ")
+    ))
+  }
+}
+
+validate_levels("Parental_Involvement", ordinal_levels)
+validate_levels("Access_to_Resources", ordinal_levels)
+validate_levels("Motivation_Level", ordinal_levels)
+validate_levels("Teacher_Quality", ordinal_levels)
+validate_levels("Family_Income", ordinal_levels)
+validate_levels("Peer_Influence", peer_levels)
+validate_levels("Distance_from_Home", distance_levels)
+validate_levels("Parental_Education_Level", education_levels)
+validate_levels("Extracurricular_Activities", c("No", "Yes"))
+validate_levels("Internet_Access", c("No", "Yes"))
+validate_levels("Learning_Disabilities", c("No", "Yes"))
+validate_levels("Gender", c("Female", "Male"))
+validate_levels("School_Type", c("Public", "Private"))
+```
+
+### Ordinal Encoding
+
+Ordinal variables have categories with a meaningful ranking, so they are first converted into ordered factors. This tells R the correct order of the categories before converting them into numeric values.
+
+This preserves the statistical meaning of progression from lower to higher levels, such as `Low < Medium < High`. The resulting `1, 2, 3` coding allows correlation and regression models to estimate the effect of a one-level increase while retaining the natural ranking of the variable.
+
+```{r ordinal-encoding}
+data$Parental_Involvement <- factor(data$Parental_Involvement,levels = ordinal_levels, ordered = TRUE)
+data$Access_to_Resources <- factor(data$Access_to_Resources,levels = ordinal_levels, ordered = TRUE)
+data$Motivation_Level <- factor(data$Motivation_Level,levels = ordinal_levels, ordered = TRUE)
+data$Teacher_Quality <- factor(data$Teacher_Quality,levels = ordinal_levels, ordered = TRUE)
+data$Family_Income <- factor(data$Family_Income,levels = ordinal_levels, ordered = TRUE)
+data$Peer_Influence <- factor(data$Peer_Influence,levels = peer_levels, ordered = TRUE)
+data$Distance_from_Home <- factor(data$Distance_from_Home,levels = distance_levels, ordered = TRUE)
+data$Parental_Education_Level <- factor(data$Parental_Education_Level,levels = education_levels, ordered = TRUE)
+
+# Convert to numeric for modelling
+data$Parental_Involvement_Num <- as.numeric(data$Parental_Involvement)
+data$Access_to_Resources_Num <- as.numeric(data$Access_to_Resources)
+data$Motivation_Level_Num <- as.numeric(data$Motivation_Level)
+data$Teacher_Quality_Num <- as.numeric(data$Teacher_Quality)
+data$Family_Income_Num <- as.numeric(data$Family_Income)
+data$Peer_Influence_Num <- as.numeric(data$Peer_Influence)
+data$Distance_from_Home_Num <- as.numeric(data$Distance_from_Home)
+data$Parental_Education_Level_Num <- as.numeric(data$Parental_Education_Level)
+```
+
+### Binary Encoding
+
+Binary variables contain only two categories, so a single `0/1` numeric column is sufficient for statistical modelling. This avoids unnecessary one-hot encoding.
+
+If both categories of a binary variable were expanded into separate dummy columns while using an intercept in regression, the model could suffer from perfect multicollinearity. This problem is commonly called the dummy variable trap. Using one `0/1` indicator keeps the coding simple and interpretable: the coefficient compares the category coded as `1` against the reference category coded as `0`.
+
+```{r binary-encoding}
+data$Extracurricular_Activities_Num <- ifelse(data$Extracurricular_Activities == "Yes", 1,ifelse(data$Extracurricular_Activities == "No", 0, NA))
+data$Internet_Access_Num <- ifelse(data$Internet_Access == "Yes", 1,ifelse(data$Internet_Access == "No", 0, NA))
+data$Learning_Disabilities_Num <- ifelse(data$Learning_Disabilities == "Yes", 1,ifelse(data$Learning_Disabilities == "No", 0, NA))
+data$Gender_Num <- ifelse(data$Gender == "Male", 1,ifelse(data$Gender == "Female", 0, NA))
+data$School_Type_Num <- ifelse(data$School_Type == "Private", 1,ifelse(data$School_Type == "Public", 0, NA))
+```
+
+### Factor Retention
+
+The numeric encoded columns are used for modelling and calculations, but the original categorical variables are retained as factors for grouped summaries, visualizations, ANOVA, t-tests, and frequency tables.
+
+This keeps the analysis interpretable. Statistical models receive numeric inputs, while descriptive and inferential sections can still display readable category names such as `Yes/No`, `Public/Private`, and `Male/Female`.
+
+```{r factor-retention}
+data$Parental_Involvement <- factor(data$Parental_Involvement,levels = ordinal_levels)
+data$Access_to_Resources <- factor(data$Access_to_Resources,levels = ordinal_levels)
+data$Motivation_Level <- factor(data$Motivation_Level,levels = ordinal_levels)
+data$Teacher_Quality <- factor(data$Teacher_Quality,levels = ordinal_levels)
+data$Family_Income <- factor(data$Family_Income,levels = ordinal_levels)
+data$Peer_Influence <- factor(data$Peer_Influence,levels = peer_levels)
+data$Distance_from_Home <- factor(data$Distance_from_Home,levels = distance_levels)
+data$Parental_Education_Level <- factor(data$Parental_Education_Level,levels = education_levels)
+data$Extracurricular_Activities <- factor(data$Extracurricular_Activities, levels = c("No", "Yes"))
+data$Internet_Access <- factor(data$Internet_Access, levels = c("No", "Yes"))
+data$Learning_Disabilities <- factor(data$Learning_Disabilities, levels = c("No", "Yes"))
+data$Gender <- factor(data$Gender, levels = c("Female", "Male"))
+data$School_Type <- factor(data$School_Type, levels = c("Public", "Private"))
+```
+
+### Encoding Verification
+
+After encoding, the new numeric columns are checked for missing values. Since complete-case analysis has already removed rows with missing categories, any `NA` values appearing at this stage would suggest a failed mapping or an unexpected category.
+
+This final check confirms that the variables are ready for correlation analysis, persistence index construction, and regression.
+
+```{r encoding-verification}
+encoded_vars <- c(
+  "Parental_Involvement_Num",
+  "Access_to_Resources_Num",
+  "Motivation_Level_Num",
+  "Teacher_Quality_Num",
+  "Family_Income_Num",
+  "Peer_Influence_Num",
+  "Distance_from_Home_Num",
+  "Parental_Education_Level_Num",
+  "Extracurricular_Activities_Num",
+  "Internet_Access_Num",
+  "Learning_Disabilities_Num",
+  "Gender_Num",
+  "School_Type_Num"
+)
+
+encoding_check <- data.frame(
+  Variable = encoded_vars,
+  Encoded_Missing = sapply(data[encoded_vars], function(x) sum(is.na(x))),
+  row.names = NULL
+)
+
+knitr::kable(encoding_check, row.names = FALSE,caption = "Encoding Safety Check")
+```
+
+
+## Derived Variables and Persistence Index
+
+### Score Improvement
+
+We create `Score_Improvement` as the difference between the current exam score and previous scores. A positive value indicates the student improved over time -- a direct signal of persistence.
+Score Improvement captures academic growth over time and serves as a direct indicator of persistence.
+
+```{r score-improvement}
+data$Score_Improvement <- data$Exam_Score - data$Previous_Scores
+```
+
+### Composite Persistence Index
+
+No single variable fully captures "persistence." A student might study many hours but miss classes, or attend regularly but score poorly. To address this, we construct a **Persistence Index** by:
+
+1. **Scaling each persistence component to a common range of -1 to 1** so variables measured on different units become directly comparable.
+2. **Averaging** the scaled values row-wise to produce a single composite value per student.
+
+The three components are: `Hours_Studied`, `Attendance`, `Score_Improvement`.
+
+```{r persistence-index}
+scale_to_minus1_plus1 <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (isTRUE(all.equal(rng[1], rng[2]))) {
+    return(rep(0, length(x)))
+  }
+  2 * ((x - rng[1]) / (rng[2] - rng[1])) - 1
+}
+
+data$Hours_Studied_Scaled <- scale_to_minus1_plus1(data$Hours_Studied)
+data$Attendance_Scaled <- scale_to_minus1_plus1(data$Attendance)
+data$Score_Improvement_Scaled <- scale_to_minus1_plus1(data$Score_Improvement)
+
+data$Persistence_Index <- rowMeans(
+  data[, c("Hours_Studied_Scaled", "Attendance_Scaled", "Score_Improvement_Scaled")]
+)
+```
+
+**Interpretation:** Values closer to **1** indicate relatively stronger persistence, while values closer to **-1** indicate relatively weaker persistence.
+
+```{r pi-summary}
+summary(data$Persistence_Index)
+```
+
+**Assumption:** Equal weighting of all three components assumes each dimension of persistence is equally important. This is a simplification; in practice, some components might matter more than others. However, equal weighting is the most defensible default without domain-specific evidence to the contrary.
+
+### Updated Encoded Numeric Dataframe
+
+After constructing `Persistence_Index`, we update `encoded_numeric_df` to keep encoded and numeric modelling variables, remove `Previous_Scores`, `Exam_Score`, and intermediate scaled columns, and retain the new target variable.
+
+```{r encoded-numeric-preview}
+numeric_vars_current <- names(data)[sapply(data, is.numeric)]
+model_input_cols <- unique(c(numeric_vars_current, encoded_vars))
+model_input_cols <- setdiff(model_input_cols, c(
+  "Previous_Scores", "Exam_Score",
+  "Hours_Studied_Scaled", "Attendance_Scaled", "Score_Improvement_Scaled"
+))
+
+encoded_numeric_df <- data[, model_input_cols]
+
+```
+
+
+---
+
+
+# Descriptive Analytics
+
+The purpose of descriptive analytics is to understand the structure and distribution of our variables before conducting formal tests. We examine central tendency, spread, frequency distributions, and visual patterns.
+
+## Numeric Variable Summaries
+
+```{r numeric-summary}
+if ("Persistence_Index" %in% names(encoded_numeric_df)) {
+  persistence_col <- "Persistence_Index"
+} else if ("persistence_index" %in% names(encoded_numeric_df)) {
+  persistence_col <- "persistence_index"
+} else {
+  stop("Persistence index column was not found in encoded_numeric_df.")
+}
+
+numeric_summary_df <- data.frame(
+  Hours_Studied = data$Hours_Studied,
+  Attendance = data$Attendance,
+  Sleep_Hours = data$Sleep_Hours,
+  Previous_Scores = data$Previous_Scores,
+  Tutoring_Sessions = data$Tutoring_Sessions,
+  Physical_Activity = data$Physical_Activity,
+  Exam_Score = data$Exam_Score,
+  Persistence_Index = encoded_numeric_df[[persistence_col]]
+)
+
+numeric_vars <- names(numeric_summary_df)
+
+stats_df <- data.frame(
+  Variable = numeric_vars,
+  Mean   = sapply(numeric_summary_df, mean),
+  Median = sapply(numeric_summary_df, median),
+  SD     = sapply(numeric_summary_df, sd),
+  Min    = sapply(numeric_summary_df, min),
+  Max    = sapply(numeric_summary_df, max),
+  IQR    = sapply(numeric_summary_df, IQR)
+)
+knitr::kable(stats_df, digits = 2, row.names = FALSE, caption = "Summary Statistics for Numeric Variables")
+```
+
+**Observation:** Examine whether the means and medians are close (suggesting symmetry) or diverge (suggesting skewness). The standard deviation indicates how spread out the values are --- larger SD means more variability among students.
+
+
+## Categorical Variable Frequencies
+
+```{r categorical-summary}
+cat_vars <- c("Parental_Involvement", "Access_to_Resources", "Teacher_Quality",
+              "Peer_Influence", "School_Type", "Motivation_Level",
+              "Extracurricular_Activities")
+
+for (var in cat_vars) {
+  tbl <- table(data[[var]])
+  pct <- prop.table(tbl) * 100
+  freq_df <- data.frame(Level = names(tbl), Count = as.numeric(tbl), Percent = round(as.numeric(pct), 1))
+  cat(sprintf("\n**%s:**\n\n", var))
+  print(knitr::kable(freq_df, row.names = FALSE))
+  cat("\n")
+}
+```
+
+**Observation:** Check whether the categories are roughly balanced. Severely imbalanced categories (e.g., 90% in one group) could weaken statistical comparisons.
+
+
+## Mean Persistence by Support Levels
+
+This is the first direct look at our analytical statement. If supported students show higher persistence, we expect the mean Persistence Index to **increase** as support levels go from Low to High.
+
+```{r persistence-by-support}
+support_vars <- c("Parental_Involvement", "Access_to_Resources","Tutoring_Sessions", "Teacher_Quality", "Peer_Influence")
+
+for (var in support_vars) {
+  group_stats <- data %>%
+    group_by(.data[[var]]) %>%
+    summarise(Mean = round(mean(Persistence_Index), 4),
+              SD   = round(sd(Persistence_Index), 4),
+              N    = n(), .groups = "drop")
+  cat(sprintf("\n**%s:**\n\n", var))
+  print(knitr::kable(group_stats, row.names = FALSE))
+  cat("\n")
+}
+```
+
+**Conclusion:** If the mean Persistence Index increases from Low to High (or from Negative to Positive for Peer Influence), this provides initial descriptive evidence supporting our analytical statement. However, these differences need formal statistical testing (Phase 4) to confirm they are not due to chance.
+
+
+## Visual Exploration
+
+### Histograms of Persistence Components
+
+Histograms reveal the shape of each variable's distribution --- whether it is symmetric, skewed, or multimodal.
+
+```{r histograms, fig.height=5}
+# Numeric variables (histograms)
+hist_vars <- c("Hours_Studied", "Attendance","Score_Improvement", "Persistence_Index")
+
+for (var in hist_vars) {
+  p <- ggplot(data, aes(x = .data[[var]])) +
+    geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.8) +
+    labs(title = paste("Distribution of", var), x = var, y = "Count") +
+    theme_minimal()
+  print(p)
+}
+
+# Motivation level (categorical)
+ggplot(data, aes(x = Motivation_Level)) +
+  geom_bar(fill = "steelblue", alpha = 0.8) +
+  labs(title = "Distribution of Motivation Level", x = "Motivation Level", y = "Count") +
+  theme_minimal()
+```
+
+
+### Bar Charts of Support Variables
+
+```{r bar-charts, fig.height=5}
+for (var in cat_vars) {
+  p <- ggplot(data, aes(x = .data[[var]], fill = .data[[var]])) +
+    geom_bar(alpha = 0.8) +
+    labs(title = paste("Distribution of", var), x = var, y = "Count") +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2") +
+    theme(legend.position = "none")
+  print(p)
+}
+```
+
+
+### Box Plots: Persistence Index by Support Variables
+
+Box plots are the key visualization for our analytical statement. They show whether the distribution of Persistence Index shifts upward as support increases.
+
+```{r boxplots, fig.height=5}
+support_varss <- c("Parental_Involvement", "Access_to_Resources", "Teacher_Quality", "Peer_Influence")
+for (var in support_varss) {
+  p <- ggplot(data, aes(x = .data[[var]], y = Persistence_Index, fill = .data[[var]])) +
+    geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+    labs(title = paste("Persistence Index by", var),
+         x = var, y = "Persistence Index") +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2") +
+    theme(legend.position = "none")
+  print(p)
+}
+```
+
+**Observation:** Look for whether the median line (thick horizontal line inside each box) rises from left to right. A clear upward trend would visually support the statement that higher support is associated with higher persistence.
+
+
+### Correlation Analysis
+
+Correlation analysis is used here for variable screening before regression. It serves two purposes: to examine how strongly each candidate support variable is related to `Persistence_Index`, and to check whether candidate predictors are too strongly correlated with each other.
+
+```{r correlation-heatmap, fig.width=10, fig.height=8}
+cor_vars <- setdiff(
+  names(encoded_numeric_df),
+  c("Hours_Studied", "Attendance", "Score_Improvement")
+)
+
+cor_matrix <- cor(encoded_numeric_df[, cor_vars], use = "complete.obs")
+
+corrplot(cor_matrix, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45,
+         addCoef.col = "black", number.cex = 0.7)
+```
+
+```{r correlation-screen-table}
+cor_with_persistence <- cor_matrix["Persistence_Index", -1]
+
+cor_screen_df <- data.frame(
+  Variable = names(cor_with_persistence),
+  Correlation_With_Persistence = round(as.numeric(cor_with_persistence), 4)
+)
+
+cor_screen_df <- cor_screen_df[order(-abs(cor_screen_df$Correlation_With_Persistence)), ]
+
+knitr::kable(cor_screen_df, row.names = FALSE,
+             caption = "Correlation of Candidate Predictors with Persistence Index")
+```
+
+Variables with stronger correlations with `Persistence_Index` are considered stronger candidates for regression, while variables with negligible correlations are treated as weaker candidates. High correlation among predictors themselves may indicate multicollinearity, which will be checked again using VIF in the regression diagnostics.
+
+Based on theoretical relevance and the observed correlation patterns, the retained candidate predictors for regression are parental involvement, access to resources, motivation level, teacher quality, peer influence, and tutoring sessions.
+
+
+## Probability Distribution Fitting
+
+A core requirement of this module is demonstrating knowledge of probability distributions from the exponential family. We fit four distributions to appropriate variables and assess goodness-of-fit.
+
+**Why this matters:** Understanding the underlying distribution of a variable tells us which statistical tests are valid. For example, t-tests and ANOVA assume approximately normal data; if a variable follows a Gamma distribution instead, different approaches may be needed.
+
+### Normal Distribution
+
+The **Normal (Gaussian) distribution** is the most widely used continuous distribution. It is symmetric and bell-shaped, characterized by two parameters: mean (μ) and standard deviation (σ). We fit it to the Persistence Index.
+
+
+```{r fit-normal-pi}
+fit_norm_pi <- fitdist(data$Persistence_Index, "norm")
+ad_pi <- ad.test(data$Persistence_Index)
+```
+
+**Persistence Index** --- Estimated μ = `r round(fit_norm_pi$estimate["mean"], 4)`, σ = `r round(fit_norm_pi$estimate["sd"], 4)`. Anderson-Darling test: A = `r round(ad_pi$statistic, 4)`, p = `r format.pval(ad_pi$p.value)`.
+
+```{r plot-normal-pi, fig.height=5}
+ggplot(data, aes(x = Persistence_Index)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30,
+                 fill = "steelblue", color = "white", alpha = 0.7) +
+  stat_function(fun = dnorm,
+                args = list(mean = fit_norm_pi$estimate["mean"],
+                            sd   = fit_norm_pi$estimate["sd"]),
+                color = "red", linewidth = 1) +
+  labs(title = "Persistence Index with Fitted Normal Distribution",
+       x = "Persistence Index", y = "Density") +
+  theme_minimal()
+```
+
+#### Q-Q Plots
+
+Q-Q (Quantile-Quantile) plots provide a visual assessment of normality. If the data is normally distributed, points should fall along the diagonal red reference line. Deviations at the tails indicate departures from normality.
+
+```{r qq-plots, fig.width=12, fig.height=4}
+par(mfrow = c(1, 3))
+qqnorm(data$Persistence_Index, main = "Q-Q Plot: Persistence Index")
+qqline(data$Persistence_Index, col = "red", lwd = 2)
+```
+
+**Note on large samples:** With n = `r nrow(data)`, the Anderson-Darling test has very high statistical power and will likely reject normality even for data that is approximately normal. In practice, we rely on the **visual fit** (histogram overlay and Q-Q plot) alongside the formal test. If the histogram closely follows the bell curve and the Q-Q points hug the reference line, the Normal distribution is a reasonable approximation even if the formal test rejects at α = 0.05.
+
+
+### Gamma Distribution
+
+The **Gamma distribution** is a continuous distribution defined for positive values, characterized by shape (α) and rate (β) parameters. It is suitable for right-skewed, non-negative data. We fit it to `Hours_Studied`, which represents study time and cannot be negative.
+
+**Assumption:** Data must be strictly positive (> 0).
+
+```{r fit-gamma}
+hours_positive <- data$Hours_Studied[data$Hours_Studied > 0]
+fit_gamma <- fitdist(hours_positive, "gamma")
+gof_gamma <- gofstat(fit_gamma)
+```
+
+`r if(length(hours_positive) < nrow(data)) paste("Note:", nrow(data) - length(hours_positive), "zero-value observations were excluded for Gamma fitting.")`
+
+Estimated shape (α) = `r round(fit_gamma$estimate["shape"], 4)`, rate (β) = `r round(fit_gamma$estimate["rate"], 4)`. Goodness-of-fit: KS = `r round(gof_gamma$ks, 4)`, CvM = `r round(gof_gamma$cvm, 4)`, AD = `r round(gof_gamma$ad, 4)`.
+
+```{r plot-gamma, fig.height=5}
+ggplot(data.frame(x = hours_positive), aes(x = x)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30,
+                 fill = "steelblue", color = "white", alpha = 0.7) +
+  stat_function(fun = dgamma,
+                args = list(shape = fit_gamma$estimate["shape"],
+                            rate  = fit_gamma$estimate["rate"]),
+                color = "red", linewidth = 1) +
+  labs(title = "Hours Studied with Fitted Gamma Distribution",
+       x = "Hours Studied", y = "Density") +
+  theme_minimal()
+```
+
+**Conclusion:** The Gamma distribution is chosen because study hours are non-negative and often right-skewed (many students study moderate amounts, fewer study very high amounts). Examine the red curve against the histogram to judge the quality of fit.
+
+
+### Poisson Distribution
+
+The **Poisson distribution** models count data --- the number of times an event occurs in a fixed interval. It is characterized by a single parameter λ (lambda), which is both the mean and variance. We fit it to `Tutoring_Sessions`, which counts how many tutoring sessions a student attended.
+
+**Assumption:** Events are independent; the mean and variance should be approximately equal (equidispersion).
+
+```{r fit-poisson}
+fit_pois <- fitdist(data$Tutoring_Sessions, "pois")
+gof_pois <- gofstat(fit_pois)
+```
+
+Estimated λ = `r round(fit_pois$estimate["lambda"], 4)`. Observed mean = `r round(mean(data$Tutoring_Sessions), 4)`, observed variance = `r round(var(data$Tutoring_Sessions), 4)`.
+
+`r if(abs(mean(data$Tutoring_Sessions) - var(data$Tutoring_Sessions)) / mean(data$Tutoring_Sessions) > 0.3) "**Note:** The variance differs noticeably from the mean, suggesting possible over- or under-dispersion relative to a Poisson model." else "The mean and variance are reasonably close, supporting the Poisson assumption of equidispersion."`
+
+```{r plot-poisson, fig.height=5}
+obs_df <- as.data.frame(table(data$Tutoring_Sessions))
+colnames(obs_df) <- c("x", "Observed")
+obs_df$x <- as.numeric(as.character(obs_df$x))
+obs_df$Observed <- obs_df$Observed / nrow(data)
+obs_df$Expected <- dpois(obs_df$x, lambda = fit_pois$estimate["lambda"])
+
+ggplot(obs_df) +
+  geom_col(aes(x = x, y = Observed), fill = "steelblue", alpha = 0.7, width = 0.6) +
+  geom_line(aes(x = x, y = Expected), color = "red", linewidth = 1) +
+  geom_point(aes(x = x, y = Expected), color = "red", size = 2.5) +
+  labs(title = "Tutoring Sessions: Observed vs Fitted Poisson Distribution",
+       x = "Number of Tutoring Sessions", y = "Probability") +
+  theme_minimal()
+```
+
+**Conclusion:** The blue bars show the observed proportion of students at each count, while the red line shows what the Poisson distribution predicts. Close alignment suggests a good fit.
+
+
+### Bernoulli (Binomial) Distribution
+
+The **Bernoulli distribution** is the simplest discrete distribution, modelling a single binary outcome (success/failure) with parameter p (probability of success). We fit it to `Extracurricular_Activities` (Yes = 1, No = 0).
+
+```{r fit-bernoulli}
+p_hat <- mean(data$Extracurricular_Activities_Num)
+```
+
+Estimated p = `r round(p_hat, 4)`. This means approximately `r round(p_hat * 100, 1)`% of students participate in extracurricular activities.
+
+```{r plot-bernoulli, fig.height=5}
+binom_df <- data.frame(
+  Category = factor(c("No", "Yes"), levels = c("No", "Yes")),
+  Observed = c(mean(data$Extracurricular_Activities_Num == 0), p_hat),
+  Expected = c(1 - p_hat, p_hat)
+)
+binom_long <- pivot_longer(binom_df, cols = c(Observed, Expected),
+                           names_to = "Type", values_to = "Proportion")
+
+ggplot(binom_long, aes(x = Category, y = Proportion, fill = Type)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  labs(title = "Extracurricular Activities: Observed vs Fitted Bernoulli",
+       x = "Participates", y = "Proportion") +
+  scale_fill_manual(values = c("Observed" = "steelblue", "Expected" = "tomato")) +
+  theme_minimal()
+```
+
+**Note:** For a Bernoulli distribution, the Maximum Likelihood Estimate (MLE) of p is exactly the sample proportion, so the observed and expected bars are identical by definition. The value here is in identifying the distribution type and estimating its parameter.
+
+
+---
+
+
+# Inferential Analytics
+
+Descriptive analysis showed patterns, but patterns alone could be due to random variation. Inferential analytics uses hypothesis testing to determine whether the observed differences are **statistically significant** --- unlikely to have occurred by chance alone.
+
+We use a significance level of **α = 0.05** throughout. If p < 0.05, we reject the null hypothesis.
+
+
+## ANOVA Workflow for Candidate Variables
+
+**Purpose:** We first run separate ANOVA tests for key candidate variables, then run a single batch ANOVA summary for the remaining candidate variables in `encoded_numeric_df`.
+
+**Candidate Variables Tested:** `Sleep_Hours`, `Tutoring_Sessions`, `Physical_Activity`, `Parental_Involvement_Num`, `Access_to_Resources_Num`, `Motivation_Level_Num`, `Teacher_Quality_Num`, `Family_Income_Num`, `Peer_Influence_Num`, `Distance_from_Home_Num`, `Parental_Education_Level_Num`, `Extracurricular_Activities_Num`, `Internet_Access_Num`, `Learning_Disabilities_Num`, `Gender_Num`, `School_Type_Num`.
+
+**Hypotheses (for each variable):**
+
+- H₀: The candidate variable has no ANOVA effect on mean `Persistence_Index`
+- H₁: The candidate variable has a significant ANOVA effect on mean `Persistence_Index`
+
+Each variable is tested as a grouping factor in one-way ANOVA, so the reported `Df` reflects the number of groups minus one.
+
+```{r anova-candidate-vars, include=FALSE}
+all_anova_candidate_vars <- c(
+  "Sleep_Hours",
+  "Tutoring_Sessions",
+  "Physical_Activity",
+  "Parental_Involvement_Num",
+  "Access_to_Resources_Num",
+  "Motivation_Level_Num",
+  "Teacher_Quality_Num",
+  "Family_Income_Num",
+  "Peer_Influence_Num",
+  "Distance_from_Home_Num",
+  "Parental_Education_Level_Num",
+  "Extracurricular_Activities_Num",
+  "Internet_Access_Num",
+  "Learning_Disabilities_Num",
+  "Gender_Num",
+  "School_Type_Num"
+)
+
+significant_anova_vars <- c(
+  "Tutoring_Sessions",
+  "Parental_Involvement_Num",
+  "Access_to_Resources_Num",
+  "Motivation_Level_Num",
+  "Teacher_Quality_Num",
+  "Peer_Influence_Num"
+)
+
+remaining_anova_vars <- setdiff(all_anova_candidate_vars, significant_anova_vars)
+
+missing_anova_vars <- setdiff(all_anova_candidate_vars, names(encoded_numeric_df))
+if (length(missing_anova_vars) > 0) {
+  stop(paste("Missing ANOVA variable(s) in encoded_numeric_df:",
+             paste(missing_anova_vars, collapse = ", ")))
+}
+
+extract_anova_row <- function(df, var_name) {
+  tmp_df <- df[, c("Persistence_Index", var_name)]
+  group_factor <- factor(tmp_df[[var_name]])
+  fit <- aov(tmp_df$Persistence_Index ~ group_factor)
+  fit_anova <- summary(fit)[[1]]
+
+  data.frame(
+    Variable = var_name,
+    Groups = nlevels(group_factor),
+    Df = fit_anova$Df[1],
+    F_value = fit_anova$`F value`[1],
+    P_value = fit_anova$`Pr(>F)`[1],
+    stringsAsFactors = FALSE
+  )
+}
+
+anova_results <- lapply(all_anova_candidate_vars, function(v) {
+  extract_anova_row(encoded_numeric_df, v)
+}) %>% bind_rows() %>%
+  mutate(
+    Significant = ifelse(P_value < 0.05, "Yes", "No"),
+    F_value = round(F_value, 4),
+    P_value = round(P_value, 6)
+  ) %>%
+  arrange(P_value)
+```
+
+**Result:** `r sum(anova_results$Significant == "Yes")` out of `r nrow(anova_results)` candidate variables are significant at α = 0.05.
+
+
+## Separate ANOVA for Significant Variables
+
+The following variables are tested separately using one-way ANOVA.
+
+```{r anova-significant-separate, include=FALSE}
+anova_significant_results <- lapply(significant_anova_vars, function(v) {
+  extract_anova_row(encoded_numeric_df, v)
+}) %>% bind_rows()
+```
+
+### ANOVA: Tutoring_Sessions
+```{r anova-tutoring-sessions}
+anova_tutoring_sessions <- aov(Persistence_Index ~ factor(Tutoring_Sessions), data = encoded_numeric_df)
+anova_tutoring_sessions_p <- summary(anova_tutoring_sessions)[[1]]$`Pr(>F)`[1]
+summary(anova_tutoring_sessions)
+```
+**Interpretation:** p = `r format.pval(anova_tutoring_sessions_p)`. `r ifelse(anova_tutoring_sessions_p < 0.05, "Since p < 0.05, Tutoring_Sessions is statistically significant for Persistence_Index.", "Since p >= 0.05, Tutoring_Sessions is not statistically significant for Persistence_Index.")`
+
+### ANOVA: Parental_Involvement_Num
+```{r anova-parental-involvement-num}
+anova_parental_involvement_num <- aov(Persistence_Index ~ factor(Parental_Involvement_Num), data = encoded_numeric_df)
+anova_parental_involvement_num_p <- summary(anova_parental_involvement_num)[[1]]$`Pr(>F)`[1]
+summary(anova_parental_involvement_num)
+```
+**Interpretation:** p = `r format.pval(anova_parental_involvement_num_p)`. `r ifelse(anova_parental_involvement_num_p < 0.05, "Since p < 0.05, Parental_Involvement_Num is statistically significant for Persistence_Index.", "Since p >= 0.05, Parental_Involvement_Num is not statistically significant for Persistence_Index.")`
+
+### ANOVA: Access_to_Resources_Num
+```{r anova-access-to-resources-num}
+anova_access_to_resources_num <- aov(Persistence_Index ~ factor(Access_to_Resources_Num), data = encoded_numeric_df)
+anova_access_to_resources_num_p <- summary(anova_access_to_resources_num)[[1]]$`Pr(>F)`[1]
+summary(anova_access_to_resources_num)
+```
+**Interpretation:** p = `r format.pval(anova_access_to_resources_num_p)`. `r ifelse(anova_access_to_resources_num_p < 0.05, "Since p < 0.05, Access_to_Resources_Num is statistically significant for Persistence_Index.", "Since p >= 0.05, Access_to_Resources_Num is not statistically significant for Persistence_Index.")`
+
+### ANOVA: Motivation_Level_Num
+```{r anova-motivation-level-num}
+anova_motivation_level_num <- aov(Persistence_Index ~ factor(Motivation_Level_Num), data = encoded_numeric_df)
+anova_motivation_level_num_p <- summary(anova_motivation_level_num)[[1]]$`Pr(>F)`[1]
+summary(anova_motivation_level_num)
+```
+**Interpretation:** p = `r format.pval(anova_motivation_level_num_p)`. `r ifelse(anova_motivation_level_num_p < 0.05, "Since p < 0.05, Motivation_Level_Num is statistically significant for Persistence_Index.", "Since p >= 0.05, Motivation_Level_Num is not statistically significant for Persistence_Index.")`
+
+### ANOVA: Teacher_Quality_Num
+```{r anova-teacher-quality-num}
+anova_teacher_quality_num <- aov(Persistence_Index ~ factor(Teacher_Quality_Num), data = encoded_numeric_df)
+anova_teacher_quality_num_p <- summary(anova_teacher_quality_num)[[1]]$`Pr(>F)`[1]
+summary(anova_teacher_quality_num)
+```
+**Interpretation:** p = `r format.pval(anova_teacher_quality_num_p)`. `r ifelse(anova_teacher_quality_num_p < 0.05, "Since p < 0.05, Teacher_Quality_Num is statistically significant for Persistence_Index.", "Since p >= 0.05, Teacher_Quality_Num is not statistically significant for Persistence_Index.")`
+
+### ANOVA: Peer_Influence_Num
+```{r anova-peer-influence-num}
+anova_peer_influence_num <- aov(Persistence_Index ~ factor(Peer_Influence_Num), data = encoded_numeric_df)
+anova_peer_influence_num_p <- summary(anova_peer_influence_num)[[1]]$`Pr(>F)`[1]
+summary(anova_peer_influence_num)
+```
+**Interpretation:** p = `r format.pval(anova_peer_influence_num_p)`. `r ifelse(anova_peer_influence_num_p < 0.05, "Since p < 0.05, Peer_Influence_Num is statistically significant for Persistence_Index.", "Since p >= 0.05, Peer_Influence_Num is not statistically significant for Persistence_Index.")`
+
+## Batch ANOVA for Remaining Variables
+
+```{r anova-remaining-vars}
+anova_remaining_results <- lapply(remaining_anova_vars, function(v) {
+  extract_anova_row(encoded_numeric_df, v)
+}) %>% bind_rows() %>%
+  mutate(
+    Significant = ifelse(P_value < 0.05, "Yes", "No"),
+    F_value = round(F_value, 4),
+    P_value = round(P_value, 6)
+  ) %>%
+  arrange(P_value)
+
+knitr::kable(anova_remaining_results, row.names = FALSE,
+             caption = "ANOVA Results for Remaining Candidate Variables")
+```
+
+```{r anova-combined-results, include=FALSE}
+anova_results <- bind_rows(anova_significant_results, anova_remaining_results) %>%
+  mutate(
+    Significant = ifelse(P_value < 0.05, "Yes", "No"),
+    F_value = round(F_value, 4),
+    P_value = round(P_value, 6)
+  ) %>%
+  arrange(P_value)
+```
+
+
+## Two-Sample t-test: School Type
+
+**Purpose:** Test whether the mean Persistence Index differs between Public and Private school students. Since School Type has exactly two levels, we use a Welch's two-sample t-test instead of ANOVA.
+
+**Assumptions:**
+
+- Continuous dependent variable.
+- Independent samples.
+- Approximately normal distributions within each group (robust with n > 30).
+- Welch's t-test does **not** require equal variances (unlike the classic t-test).
+
+**Hypotheses:**
+
+- H₀: μ_Public = μ_Private
+- H₁: μ_Public ≠ μ_Private
+
+```{r t-test-school}
+t_school <- t.test(Persistence_Index ~ School_Type, data = data)
+t_school
+```
+
+**Result:** t = `r round(t_school$statistic, 2)`, p = `r format.pval(t_school$p.value)`. `r ifelse(t_school$p.value < 0.05, "We **reject H₀** --- there is a significant difference in persistence between public and private school students.", "We **fail to reject H₀** --- no significant difference in persistence between school types.")`
+
+
+## Two-Proportion z-test
+
+**Purpose:** Test whether the proportion of "high-persistence" students differs between those with High vs Low parental involvement. This converts our continuous index into a binary outcome (above/below median) and tests proportions.
+
+**Hypotheses:**
+
+- H₀: p_HighInvolvement = p_LowInvolvement
+- H₁: p_HighInvolvement ≠ p_LowInvolvement
+
+```{r proportion-test}
+data$High_Persistence <- ifelse(data$Persistence_Index > median(data$Persistence_Index), 1, 0)
+
+high_inv <- data[data$Parental_Involvement == "High", ]
+low_inv  <- data[data$Parental_Involvement == "Low", ]
+
+successes <- c(sum(high_inv$High_Persistence), sum(low_inv$High_Persistence))
+totals    <- c(nrow(high_inv), nrow(low_inv))
+
+prop_result <- prop.test(successes, totals)
+```
+
+- High Involvement group: `r successes[1]`/`r totals[1]` = `r round(successes[1]/totals[1]*100, 1)`% above median persistence
+- Low Involvement group: `r successes[2]`/`r totals[2]` = `r round(successes[2]/totals[2]*100, 1)`% above median persistence
+
+```{r prop-result}
+prop_result
+```
+
+**Result:** p = `r format.pval(prop_result$p.value)`. `r ifelse(prop_result$p.value < 0.05, "The proportions are **significantly different**. Students with high parental involvement are more likely to be in the high-persistence group.", "The proportions are **not significantly different**.")`
+
+
+## Variance Tests
+
+### Levene's Test: Parental Involvement Groups
+
+**Purpose:** Test whether the variance of Persistence Index is equal across the three Parental Involvement groups. This is also a check on the homogeneity of variance assumption used by ANOVA.
+
+**Hypotheses:**
+
+- H₀: σ²_Low = σ²_Medium = σ²_High
+- H₁: At least one group variance differs
+
+```{r levene-test}
+levene_result <- leveneTest(Persistence_Index ~ Parental_Involvement, data = data)
+levene_pval <- levene_result[["Pr(>F)"]][1]
+levene_result
+```
+
+**Result:** p = `r format.pval(levene_pval)`. `r ifelse(levene_pval < 0.05, "The variances are **significantly different** across groups. This suggests some heterogeneity, though ANOVA is robust to mild violations with large sample sizes.", "The variances are **not significantly different**, supporting the homogeneity of variance assumption for ANOVA.")`
+
+### F-test: Public vs Private
+
+**Purpose:** Compare the variance of Persistence Index between Public and Private school students.
+
+**Hypotheses:**
+
+- H₀: σ²_Public = σ²_Private
+- H₁: σ²_Public ≠ σ²_Private
+
+```{r f-test}
+f_result <- var.test(Persistence_Index ~ School_Type, data = data)
+f_result
+```
+
+**Result:** F = `r round(f_result$statistic, 4)`, p = `r format.pval(f_result$p.value)`. `r ifelse(f_result$p.value < 0.05, "The variances are **significantly different** between school types.", "The variances are **not significantly different**.")`
+
+---
+
+# Predictive Analytics
+
+Having established which support variables are descriptively and inferentially associated with persistence, we now build predictive models. These models go beyond testing *whether* a relationship exists --- they quantify *how much* each support variable contributes and *how well* we can predict persistence from support factors.
+
+## Shared Train-Test Split for Predictive Models
+
+To ensure fair comparison, all predictive models in this section are trained on the same training dataset and evaluated on the same test dataset.
+
+```{r predictive-train-test-split}
+set.seed(42)
+
+predictive_data <- data[, c("Persistence_Index",
+                            "Parental_Involvement_Num", "Access_to_Resources_Num",
+                            "Tutoring_Sessions",
+                            "Teacher_Quality_Num", "Peer_Influence_Num")]
+
+train_idx_predictive <- createDataPartition(predictive_data$Persistence_Index, p = 0.8, list = FALSE)
+train_predictive <- predictive_data[train_idx_predictive, ]
+test_predictive  <- predictive_data[-train_idx_predictive, ]
+```
+
+- Training set: `r nrow(train_predictive)` observations
+- Test set: `r nrow(test_predictive)` observations
+
+
+## Multiple Linear Regression
+
+**Purpose:** Model the Persistence Index as a linear function of the ANOVA-significant support variables. This quantifies the independent contribution of the strongest candidate predictors.
+
+**Model specification:**
+$$\text{Persistence Index} = \beta_0 + \beta_1 \cdot \text{Parental Involvement} + \beta_2 \cdot \text{Access to Resources} + \ldots + \epsilon$$
+
+**Assumptions of Linear Regression:**
+
+1. **Linearity:** The relationship between predictors and response is linear.
+2. **Independence:** Observations are independent.
+3. **Normality of residuals:** The error terms are normally distributed.
+4. **Homoscedasticity:** The variance of residuals is constant across fitted values.
+5. **No multicollinearity:** Predictors are not highly correlated with each other.
+
+We use numerically encoded predictors so the regression model can estimate how the selected support variables relate to the continuous Persistence Index.
+
+The regression model uses predictors that were identified as statistically significant in the inferential ANOVA stage and then refined through regression modelling.
+
+
+### Full Model
+
+```{r regression-full}
+model_data <- train_predictive
+
+full_model <- lm(Persistence_Index ~ ., data = model_data)
+summary(full_model)
+```
+
+
+```{r model-metrics}
+r_sq     <- summary(full_model)$r.squared
+adj_r_sq <- summary(full_model)$adj.r.squared
+```
+
+- **R-squared:** `r round(r_sq, 4)` --- the model explains `r round(r_sq * 100, 1)`% of the variance in the Persistence Index.
+- **Adjusted R-squared:** `r round(adj_r_sq, 4)` --- adjusted for the number of predictors.
+
+**Interpretation of coefficients:** Each coefficient represents the expected change in Persistence Index for a one-unit increase in that predictor, holding all other predictors constant. Positive coefficients indicate that higher values of the predictor are associated with higher persistence.
+
+```{r significant-predictors}
+coef_tbl <- summary(full_model)$coefficients
+sig_mask <- coef_tbl[, "Pr(>|t|)"] < 0.05 & rownames(coef_tbl) != "(Intercept)"
+if (any(sig_mask)) {
+  sig_df <- data.frame(
+    Predictor  = rownames(coef_tbl)[sig_mask],
+    Coefficient = round(coef_tbl[sig_mask, "Estimate"], 4),
+    P_Value    = format.pval(coef_tbl[sig_mask, "Pr(>|t|)"])
+  )
+  knitr::kable(sig_df, row.names = FALSE,
+               caption = "Statistically Significant Predictors (p < 0.05)")
+}
+```
+
+### Regression Diagnostics
+
+We verify that the regression assumptions hold by examining diagnostic plots.
+
+```{r diagnostics, fig.width=10, fig.height=8}
+par(mfrow = c(2, 2))
+plot(full_model)
+```
+
+**Reading the plots:**
+                     
+- **Residuals vs Fitted:** Points should be randomly scattered around 0 with no pattern. A funnel shape indicates heteroscedasticity.  
+  - Linearity is mostly satisfied  
+  - Slight non-linearity exists  
+  - "The residuals are mostly randomly scattered around zero, indicating that the linearity assumption is reasonably satisfied, although a slight curvature suggests minor deviation from perfect linearity"
+  
+- **Normal Q-Q:** Points should follow the diagonal line. Deviations at the tails suggest non-normal residuals.
+  - But there is a S-shape at tails - So residuals are not perfectly normal
+  - But since dataset is large (~6000+) it is OK
+  - "The Q-Q plot shows slight deviations from normality at the tails, but overall the residuals are approximately normal. Given the large sample size, this deviation is not a major concern"
+  
+- **Scale-Location:** The red line should be roughly horizontal. An upward trend suggests increasing variance.
+  - Red line is slightly upward curved - Spread increases a bit (variance not perfectly constant)
+  - "The Scale-Location plot indicates a slight increase in residual variance, suggesting mild heteroscedasticity. However, the effect is not severe"
+  
+- **Residuals vs Leverage:** Points beyond Cook's distance lines (dashed) are influential observations that disproportionately affect the model.
+  - Most points are clustered. Few points far away (like 2153)
+  - Meaning: Some influential observations exist
+  - "A few observations with higher leverage are present, indicating potential influential points, but they are limited in number and do not significantly distort the model"
+
+
+***FINAL OVERALL INTERPRETATION***
+
+“The diagnostic plots suggest that the regression assumptions are reasonably satisfied. While minor deviations from linearity, normality, and homoscedasticity are observed, these are not severe. A few influential observations are present but do not significantly affect the model. Therefore, the regression model is considered valid for interpretation.”
+
+### Multicollinearity Check (VIF)
+
+The Variance Inflation Factor measures how much the variance of a coefficient is inflated due to correlations among predictors. VIF > 5 suggests concerning multicollinearity; VIF > 10 is severe.
+
+```{r vif}
+vif_values <- vif(full_model)
+vif_df <- data.frame(Variable = names(vif_values), VIF = round(as.numeric(vif_values), 2))
+knitr::kable(vif_df, row.names = FALSE, caption = "Variance Inflation Factors")
+```
+
+`r if(all(as.numeric(vif_values) < 5)) "All VIF values are below 5, indicating **no multicollinearity concerns**." else "Some VIF values exceed 5, suggesting potential multicollinearity. Consider removing or combining highly correlated predictors."`
+
+
+### Influential Observations (Cook's Distance)
+
+```{r cooks-distance}
+cooks_d <- cooks.distance(full_model)
+threshold <- 4 / nrow(model_data)
+influential <- which(cooks_d > threshold)
+```
+
+Using the standard threshold of 4/n = `r round(threshold, 6)`, there are **`r length(influential)`** influential observations (`r round(length(influential)/nrow(model_data)*100, 1)`% of the data). These observations have a disproportionate effect on the regression coefficients but are retained as they represent real student data.
+
+
+---
+
+
+## Decision Tree Regression
+
+**Purpose:** While multiple linear regression models the Persistence Index as a linear combination of predictors, Decision Tree Regression provides an interpretable non-linear alternative. It recursively splits the data into smaller groups based on predictor values and predicts persistence using the average value within each terminal node.
+
+**Why use this model:** Decision Tree Regression is suitable here because the target variable, `Persistence_Index`, is continuous, and the tree can capture non-linear relationships while remaining a white-box model.
+
+### Train-Test Split
+
+We split the data into 80% training and 20% testing sets. Both the decision tree and linear regression are evaluated on the same test set for fair comparison.
+
+```{r tree-train-test-split}
+tree_data <- predictive_data
+train_tree <- train_predictive
+test_tree  <- test_predictive
+```
+
+- Training set: `r nrow(train_tree)` observations
+- Test set: `r nrow(test_tree)` observations
+
+### Model Training
+
+We train a Decision Tree Regression model using the same predictors considered in the regression model.
+
+```{r tree-model-training}
+tree_model <- rpart(
+  Persistence_Index ~ .,
+  data = train_tree,
+  method = "anova"
+)
+
+printcp(tree_model)
+```
+
+### Tree Visualization
+
+```{r tree-visualization, fig.width=10, fig.height=8}
+if (requireNamespace("rpart.plot", quietly = TRUE)) {
+  rpart.plot::rpart.plot(
+    tree_model,
+    type = 2,
+    extra = 101,
+    fallen.leaves = TRUE,
+    main = "Decision Tree Regression for Persistence Index"
+  )
+} else {
+  plot(tree_model)
+  text(tree_model, use.n = TRUE, cex = 0.8)
+}
+```
+
+### Decision Tree Model Evaluation
+
+We evaluate the decision tree on the test set using RMSE and R-squared.
+
+```{r tree-model-evaluation}
+tree_pred <- predict(tree_model, newdata = test_tree)
+
+tree_rmse <- RMSE(tree_pred, test_tree$Persistence_Index)
+tree_r2   <- R2(tree_pred, test_tree$Persistence_Index)
+
+tree_metrics <- data.frame(
+  Model = "Decision Tree Regression",
+  RMSE = round(tree_rmse, 4),
+  R_Squared = round(tree_r2, 4)
+)
+
+knitr::kable(
+  tree_metrics,
+  row.names = FALSE,
+  caption = "Decision Tree Regression Performance on Test Data"
+)
+```
+
+**Interpretation:** The Decision Tree Regression model predicts the Persistence Index by splitting students into interpretable groups based on support and control variables. Its predictive performance is evaluated using RMSE and R-squared on unseen test data.
+
+### Comparison with Linear Regression
+
+To compare both predictive models fairly, we train a linear regression model on the same training set and evaluate it on the same test set.
+
+```{r tree-vs-linear-comparison}
+lm_pred <- predict(full_model, newdata = test_tree)
+
+lm_rmse <- RMSE(lm_pred, test_tree$Persistence_Index)
+lm_r2   <- R2(lm_pred, test_tree$Persistence_Index)
+n_test <- nrow(test_tree)
+p_pred <- ncol(train_tree) - 1
+lm_adj_r2 <- 1 - (1 - lm_r2) * ((n_test - 1) / (n_test - p_pred - 1))
+tree_adj_r2 <- 1 - (1 - tree_r2) * ((n_test - 1) / (n_test - p_pred - 1))
+
+comparison_df <- data.frame(
+  Model = c("Linear Regression", "Decision Tree Regression"),
+  `R^2` = round(c(lm_r2, tree_r2), 4),
+  `Adjusted R^2` = round(c(lm_adj_r2, tree_adj_r2), 4),
+  RMSE = round(c(lm_rmse, tree_rmse), 4)
+)
+
+knitr::kable(
+  comparison_df,
+  row.names = FALSE,
+  caption = "Predictive Performance Comparison on Test Data"
+)
+```
+
+**Interpretation:** Linear Regression provides a strong baseline under a linear assumption, while Decision Tree Regression provides a transparent non-linear alternative. The better model is identified by lower RMSE and higher R-squared on the same test data.
+
+
+# Conclusion
+
+## Summary of Findings
+
+```{r conclusion-setup, include=FALSE}
+anova_pvals <- setNames(anova_results$P_value, anova_results$Variable)
+sig_anova <- names(anova_pvals)[sapply(anova_pvals, function(p) p < 0.05)]
+nonsig_anova <- names(anova_pvals)[sapply(anova_pvals, function(p) p >= 0.05)]
+cor_result <- cor.test(encoded_numeric_df$Tutoring_Sessions,
+                       encoded_numeric_df$Persistence_Index)
+```
+
+### Descriptive Evidence
+
+The group-wise mean Persistence Index shows the pattern of support vs persistence across all support variables. Differences in group means provide initial evidence, but these are confirmed through formal testing below.
+
+### Inferential Evidence
+
+At α = 0.05:
+
+```{r conclusion-anova, echo=FALSE, results='asis'}
+for (name in names(anova_pvals)) {
+  sig <- ifelse(anova_pvals[[name]] < 0.05, "**Significant**", "Not significant")
+  cat(sprintf("- %s: p = %s (%s)\n", name, format.pval(anova_pvals[[name]]), sig))
+}
+cat(sprintf("- School Type (t-test): p = %s (%s)\n",
+            format.pval(t_school$p.value),
+            ifelse(t_school$p.value < 0.05, "**Significant**", "Not significant")))
+cat(sprintf("- Proportion test (High vs Low Involvement): p = %s (%s)\n",
+            format.pval(prop_result$p.value),
+            ifelse(prop_result$p.value < 0.05, "**Significant**", "Not significant")))
+cat(sprintf("- Tutoring-Persistence correlation: r = %.4f, p = %s (%s)\n",
+            cor_result$estimate, format.pval(cor_result$p.value),
+            ifelse(cor_result$p.value < 0.05, "**Significant**", "Not significant")))
+```
+
+### Predictive Evidence
+
+- **Regression:** The final model explains `r round(adj_r_sq * 100, 1)`% of the variance in persistence (Adjusted R² = `r round(adj_r_sq, 4)`).
+- **Decision Tree Regression:** The model achieved an RMSE of `r round(tree_rmse, 4)` and an R-squared of `r round(tree_r2, 4)` on the test set.
+
+
+## Answer to the Analytical Statement
+
+`r if(length(sig_anova) > 0) paste0("The evidence **supports** the analytical statement. Specifically, ", paste(sig_anova, collapse = ", "), " showed statistically significant effects on student persistence. The regression model confirms that support variables are meaningful predictors of persistence, and the Decision Tree Regression model provides an interpretable non-linear alternative for prediction.") else "The evidence does not strongly support the analytical statement. While descriptive differences exist, the formal hypothesis tests did not find statistically significant effects of support variables on persistence at α = 0.05."`
+
+
+## Limitations
+
+1. **Cross-sectional data:** The dataset captures a single point in time. We can identify associations but cannot establish causation (e.g., support *causes* persistence).
+2. **Composite index assumptions:** The Persistence Index assigns equal weight to all three components. In reality, some dimensions may matter more than others.
+3. **Large sample sensitivity:** With n = `r nrow(data)`, hypothesis tests have very high statistical power and may flag trivially small differences as "significant." Effect sizes should be considered alongside p-values.
+4. **Proxy variables:** "Feeling supported" is subjective, but we measure it through observable proxies (parental involvement, teacher quality, etc.). The actual experience of support may differ from these proxies.
+5. **Decision tree instability:** Decision trees are easy to interpret, but small changes in the data can lead to different splits. Although useful for identifying non-linear patterns, they may be less stable than parametric models such as linear regression.
